@@ -19,13 +19,8 @@
 
 import { createJsonLineStream } from './acp.js';
 
-let nextRpcId = 1;
-
-function sendCommand(writable, type, params = {}) {
-  const id = nextRpcId++;
-  writable.write(`${JSON.stringify({ id, type, ...params })}\n`);
-  return id;
-}
+// sendCommand is scoped inside attachPiRpcSession to avoid sharing
+// the RPC id counter across concurrent sessions.
 
 // Auto-approve any extension UI dialog (select/confirm/input/editor).
 // The web UI has no surface for these; resolving them keeps pi unblocked.
@@ -85,6 +80,14 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
   let fatal = false;
   let sentFirstToken = false;
 
+  let nextRpcId = 1;
+
+  function sendCommand(writable, type, params = {}) {
+    const id = nextRpcId++;
+    writable.write(`${JSON.stringify({ id, type, ...params })}\n`);
+    return id;
+  }
+
   // Track the prompt request id so we know when the prompt response arrives.
   let promptRpcId = null;
 
@@ -134,16 +137,16 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
       // pi's RPC process stays alive after agent_end (designed for
       // multi-prompt sessions). The daemon's /api/chat is single-shot,
       // so close stdin and let the process exit naturally, or kill it
-      // after a short grace period.
+      // after a grace period.
       try {
         child.stdin.end();
       } catch {}
-      // If the process doesn't exit within 2s after stdin close, kill it.
-      // This handles the case where pi's event loop doesn't drain
-      // promptly after stdin closes.
+      // Grace period before SIGTERM. Configurable via PI_GRACEFUL_SHUTDOWN_MS
+      // for resource-constrained machines where the event loop drains slowly.
+      const shutdownMs = Number(process.env.PI_GRACEFUL_SHUTDOWN_MS) || 5000;
       setTimeout(() => {
         if (!child.killed) child.kill('SIGTERM');
-      }, 2000);
+      }, shutdownMs);
       return;
     }
 

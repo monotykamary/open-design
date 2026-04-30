@@ -424,6 +424,40 @@ test('pi RPC: sendCommand increments ids across calls', () => {
   assert.equal(p2.type, 'steer');
 });
 
+test('pi RPC: concurrent sessions get independent id sequences', () => {
+  // Each session has its own nextRpcId counter, so two sessions
+  // spawned at the same time get non-colliding ids.
+  const written1 = [];
+  const written2 = [];
+  const mock1 = { write(data) { written1.push(data); } };
+  const mock2 = { write(data) { written2.push(data); } };
+
+  // Session 1
+  let nextId1 = 1;
+  function send1(w, type, params = {}) {
+    const id = nextId1++;
+    w.write(`${JSON.stringify({ id, type, ...params })}\n`);
+    return id;
+  }
+  // Session 2
+  let nextId2 = 1;
+  function send2(w, type, params = {}) {
+    const id = nextId2++;
+    w.write(`${JSON.stringify({ id, type, ...params })}\n`);
+    return id;
+  }
+
+  const id1 = send1(mock1, 'prompt', { message: 'hello' });
+  const id2 = send2(mock2, 'prompt', { message: 'world' });
+
+  assert.equal(id1, 1);
+  assert.equal(id2, 1); // independent counter
+  const p1 = JSON.parse(written1[0].trim());
+  const p2 = JSON.parse(written2[0].trim());
+  assert.equal(p1.id, 1);
+  assert.equal(p2.id, 1);
+});
+
 test('pi RPC: no duplicate usage when both message_end and turn_end carry usage', () => {
   // Regression: pi emits both message_end and turn_end per turn,
   // both carrying usage. We must only emit from turn_end to avoid
