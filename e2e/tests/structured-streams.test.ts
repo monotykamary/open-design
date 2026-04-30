@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createClaudeStreamHandler } from '../../apps/daemon/claude-stream.js';
-import { createCopilotStreamHandler } from '../../apps/daemon/copilot-stream.js';
-import { createJsonLineStream } from '../../apps/daemon/acp.js';
+import { createClaudeStreamHandler } from '../../apps/daemon/src/claude-stream.js';
+import { createCopilotStreamHandler } from '../../apps/daemon/src/copilot-stream.js';
+import { createJsonLineStream } from '../../apps/daemon/src/acp.js';
 
 describe('structured agent stream fixtures', () => {
   it('emits TodoWrite tool_use from Claude Code stream JSON', () => {

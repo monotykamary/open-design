@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { parsePiModels } from './pi-rpc.js';
+import { parsePiModels } from '../src/pi-rpc.js';
 
 // ─── parsePiModels ─────────────────────────────────────────────────────────
 
@@ -104,7 +104,7 @@ test('parsePiModels skips duplicate default id', () => {
 // We test the event translation by simulating pi's RPC stdout lines
 // through the same parser pipeline that attachPiRpcSession uses.
 
-import { createJsonLineStream } from './acp.js';
+import { createJsonLineStream } from '../src/acp.js';
 
 function simulateRpcSession(rpcLines, options = {}) {
   const events = [];
