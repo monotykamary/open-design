@@ -16,6 +16,7 @@ import {
 import { listSkills } from './skills.js';
 import { listDesignSystems, readDesignSystem } from './design-systems.js';
 import { attachAcpSession } from './acp.js';
+import { attachPiRpcSession } from './pi-rpc.js';
 import { createClaudeStreamHandler } from './claude-stream.js';
 import { createCopilotStreamHandler } from './copilot-stream.js';
 import { createJsonEventStreamHandler } from './json-event-stream.js';
@@ -1151,7 +1152,7 @@ export async function startServer({ port = 7456, returnServer = false } = {}) {
         cwd: cwd || undefined,
         shell: useShell,
       });
-      if ((def.promptViaStdin || needsFilePrompt) && child.stdin) {
+      if ((def.promptViaStdin || needsFilePrompt) && child.stdin && def.streamFormat !== 'pi-rpc') {
         // EPIPE from a fast-exiting CLI (bad auth, missing model, exit on
         // launch) would otherwise surface as an unhandled stream error and
         // crash the daemon. Swallow it — the regular exit/close handlers
@@ -1184,6 +1185,14 @@ export async function startServer({ port = 7456, returnServer = false } = {}) {
       const copilot = createCopilotStreamHandler((ev) => send('agent', ev));
       child.stdout.on('data', (chunk) => copilot.feed(chunk));
       child.on('close', () => copilot.flush());
+    } else if (def.streamFormat === 'pi-rpc') {
+      acpSession = attachPiRpcSession({
+        child,
+        prompt: composed,
+        cwd: cwd || PROJECT_ROOT,
+        model: safeModel,
+        send,
+      });
     } else if (def.streamFormat === 'acp-json-rpc') {
       acpSession = attachAcpSession({
         child,
