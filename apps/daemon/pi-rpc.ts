@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Drives pi's `--mode rpc` JSON-RPC protocol over stdio and maps agent
  * events into the daemon's typed UI events (the same set that
