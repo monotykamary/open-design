@@ -275,7 +275,13 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
     }
   });
 
-  child.stdout.on('data', (chunk) => parser.feed(chunk));
+  child.stdout.on('data', (chunk) => {
+    try {
+      parser.feed(chunk);
+    } catch (err) {
+      fail(`parser: ${err.message}`);
+    }
+  });
   child.stdout.on('close', () => parser.flush());
   child.on('error', (err) => fail(err.message));
 
