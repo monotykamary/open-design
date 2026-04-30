@@ -210,25 +210,11 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
     }
 
     if (raw.type === 'message_end' && raw.message) {
-      // Final message — extract usage if not already captured.
-      // (Some providers only report usage on the final message.)
+      // Extract tool calls from the completed assistant message content.
+      // Note: usage is NOT emitted here because `turn_end` already
+      // emits it. Pi fires both `message_end` and `turn_end` per turn,
+      // both carrying usage; emitting from both would double-count.
       const msg = raw.message;
-      if (msg.role === 'assistant' && msg.usage) {
-        const u = msg.usage;
-        const usage = {};
-        if (typeof u.input === 'number') usage.input_tokens = u.input;
-        if (typeof u.output === 'number') usage.output_tokens = u.output;
-        if (typeof u.cacheRead === 'number') usage.cached_read_tokens = u.cacheRead;
-        if (typeof u.cacheWrite === 'number') usage.cached_write_tokens = u.cacheWrite;
-        if (Object.keys(usage).length > 0) {
-          send('agent', {
-            type: 'usage',
-            usage,
-            costUsd: u.cost?.total ?? u.cost?.totalCost ?? null,
-            durationMs: Date.now() - runStartedAt,
-          });
-        }
-      }
 
       // Extract tool calls from the completed assistant message content.
       if (Array.isArray(msg.content)) {

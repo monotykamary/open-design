@@ -423,3 +423,31 @@ test('pi RPC: sendCommand increments ids across calls', () => {
   assert.equal(p1.type, 'prompt');
   assert.equal(p2.type, 'steer');
 });
+
+test('pi RPC: no duplicate usage when both message_end and turn_end carry usage', () => {
+  // Regression: pi emits both message_end and turn_end per turn,
+  // both carrying usage. We must only emit from turn_end to avoid
+  // double-counting. See Copilot review PR #117.
+  const events = simulateRpcSession([
+    { type: 'agent_start' },
+    { type: 'turn_start' },
+    {
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 150 },
+      },
+    },
+    {
+      type: 'turn_end',
+      message: {
+        role: 'assistant',
+        usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 150 },
+      },
+    },
+  ]);
+
+  const usageEvents = events.filter((e) => e.type === 'usage');
+  assert.equal(usageEvents.length, 1, 'should emit exactly one usage event per turn');
+  assert.equal(usageEvents[0].usage.input_tokens, 100);
+});
