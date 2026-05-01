@@ -66,7 +66,8 @@ function replyExtensionUi(writable, raw) {
 /**
  * Map a single pi RPC event to zero or more daemon UI events.
  *
- * Pure function: no side effects, no child process or stdin. The
+ * No I/O or child process interaction; mutates `ctx.sentFirstToken`
+ * to track streaming state.
  * `send` callback and `ctx` are provided by the caller.
  *
  * @param {object} raw        - parsed JSON from pi's stdout
