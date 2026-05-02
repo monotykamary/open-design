@@ -162,11 +162,6 @@ export function mapPiRpcEvent(raw, send, ctx) {
       name: raw.toolName ?? null,
       input: raw.args ?? null,
     });
-    send('agent', {
-      type: 'status',
-      label: 'tool',
-      toolName: raw.toolName ?? null,
-    });
     return null;
   }
 

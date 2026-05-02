@@ -215,7 +215,6 @@ test('pi RPC: tool execution events mapped correctly', () => {
 
   assert.deepEqual(events, [
     { type: 'tool_use', id: 'tc-1', name: 'read', input: { path: 'foo.txt' } },
-    { type: 'status', label: 'tool', toolName: 'read' },
     { type: 'tool_result', toolUseId: 'tc-1', content: 'file contents here', isError: false },
   ]);
 });
