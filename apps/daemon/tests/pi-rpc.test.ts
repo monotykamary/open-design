@@ -1,7 +1,9 @@
 // @ts-nocheck
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { parsePiModels, mapPiRpcEvent } from '../src/pi-rpc.js';
+import { parsePiModels, mapPiRpcEvent, attachPiRpcSession } from '../src/pi-rpc.js';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 
 // ─── parsePiModels ─────────────────────────────────────────────────────────
 
@@ -448,140 +450,159 @@ test('pi RPC: no duplicate usage when both message_end and turn_end carry usage'
   assert.equal(usageEvents[0].usage.input_tokens, 100);
 });
 
-// ─── attachPiRpcSession initial status ─────────────────────────────────────
+// ─── attachPiRpcSession integration tests ──────────────────────────────────
+//
+// These exercise the real attachPiRpcSession against a mock child process
+// so regressions in the actual function (wrong events, missing model
+// normalization, abort not writing to stdin, etc.) are caught.
+
+function createMockChild() {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killed = false;
+  child.kill = (signal) => {
+    child.killed = true;
+    child.emit('close', null, signal);
+  };
+  return child;
+}
+
+function createSession(childOpts = {}) {
+  const events = [];
+  const send = (channel, payload) => events.push({ channel, ...payload });
+  const model = childOpts.model ?? null;
+  const child = createMockChild();
+
+  const session = attachPiRpcSession({
+    child,
+    prompt: 'test prompt',
+    cwd: '/tmp',
+    model,
+    send,
+  });
+
+  return { child, session, events, send };
+}
+
+function feedStdoutLines(child, lines) {
+  const input = lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+  child.stdout.write(input);
+}
+
+function closeStdout(child) {
+  child.stdout.end();
+  child.stdin.end();
+}
 
 test('attachPiRpcSession emits status:initializing with model name', () => {
-  // Simulate what attachPiRpcSession does before sending the prompt.
-  // This is the daemon-side injection, not from pi's stdout.
-  const events = [];
-  const send = (_channel, payload) => events.push(payload);
-  const model = 'anthropic/claude-sonnet-4-5';
+  const { events } = createSession({ model: 'anthropic/claude-sonnet-4-5' });
 
-  // This is the exact line attachPiRpcSession runs before sending the prompt
-  send('agent', {
-    type: 'status',
-    label: 'initializing',
-    model: model,
-  });
-
-  assert.equal(events.length, 1);
-  assert.equal(events[0].type, 'status');
-  assert.equal(events[0].label, 'initializing');
-  assert.equal(events[0].model, 'anthropic/claude-sonnet-4-5');
+  const init = events.find(
+    (e) => e.channel === 'agent' && e.type === 'status' && e.label === 'initializing',
+  );
+  assert.ok(init, 'should emit status:initializing');
+  assert.equal(init.model, 'anthropic/claude-sonnet-4-5');
 });
 
-test('attachPiRpcSession emits status:initializing without model when model is null', () => {
-  const events = [];
-  const send = (_channel, payload) => events.push(payload);
+test('attachPiRpcSession emits status:initializing with null model when model is null', () => {
+  const { events } = createSession({ model: null });
 
-  send('agent', {
-    type: 'status',
-    label: 'initializing',
-    model: null,
-  });
-
-  assert.equal(events.length, 1);
-  assert.equal(events[0].type, 'status');
-  assert.equal(events[0].label, 'initializing');
-  assert.equal(events[0].model, null);
+  const init = events.find(
+    (e) => e.channel === 'agent' && e.type === 'status' && e.label === 'initializing',
+  );
+  assert.ok(init, 'should emit status:initializing');
+  assert.equal(init.model, null);
 });
 
-// ─── abort command format ──────────────────────────────────────────────────
+test('attachPiRpcSession sends prompt command on stdin', () => {
+  const { child } = createSession();
 
-test('pi RPC: abort command writes well-formed JSON', async () => {
-  const written = [];
-  const mockWritable = {
-    write(data) {
-      written.push(data);
-    },
-  };
+  // Read what was written to stdin — the first line should be a prompt command.
+  const chunks = [];
+  child.stdin.on('data', (chunk) => chunks.push(chunk.toString()));
+  // stdin already received the prompt write; PassThrough buffers it.
+  const buffered = child.stdin.read();
+  if (buffered) chunks.push(buffered.toString());
 
-  let nextId = 1;
-  let stdinOpen = true;
-  function sendCommand(writable, type, params = {}) {
-    if (!stdinOpen) return null;
-    const id = nextId++;
-    try {
-      writable.write(`${JSON.stringify({ id, type, ...params })}\n`);
-      return id;
-    } catch {
-      return null;
-    }
-  }
+  const lines = chunks.join('').trim().split('\n');
+  const promptLine = lines.find((l) => {
+    try { return JSON.parse(l).type === 'prompt'; } catch { return false; }
+  });
+  assert.ok(promptLine, 'should send a prompt command on stdin');
+  const parsed = JSON.parse(promptLine);
+  assert.equal(parsed.type, 'prompt');
+  assert.equal(parsed.message, 'test prompt');
+});
 
-  const id = sendCommand(mockWritable, 'abort');
-  assert.ok(id !== null, 'abort should return a valid id');
-  assert.equal(written.length, 1);
-  const parsed = JSON.parse(written[0].trim());
+test('attachPiRpcSession abort() writes well-formed abort command to stdin', () => {
+  const { child, session } = createSession();
+
+  // Drain any buffered stdin data (the prompt command) before abort.
+  child.stdin.read();
+
+  const chunks = [];
+  child.stdin.on('data', (chunk) => chunks.push(chunk.toString()));
+
+  session.abort();
+
+  // Read the abort command from stdin buffer.
+  const buffered = child.stdin.read();
+  if (buffered) chunks.push(buffered.toString());
+
+  const lines = chunks.join('').trim().split('\n');
+  const abortLine = lines.find((l) => {
+    try { return JSON.parse(l).type === 'abort'; } catch { return false; }
+  });
+  assert.ok(abortLine, 'should send an abort command on stdin');
+  const parsed = JSON.parse(abortLine);
   assert.equal(parsed.type, 'abort');
   assert.equal(typeof parsed.id, 'number');
 });
 
-test('pi RPC: abort is no-op after stdin closed', async () => {
-  const written = [];
-  const mockWritable = {
-    write(data) {
-      written.push(data);
-    },
-  };
+test('attachPiRpcSession abort() is idempotent and no-op after stdin close', () => {
+  const { child, session } = createSession();
 
-  let nextId = 1;
-  let stdinOpen = false; // already closed
-  function sendCommand(writable, type, _params = {}) {
-    if (!stdinOpen) return null;
-    const id = nextId++;
-    writable.write(`${JSON.stringify({ id, type })}\n`);
-    return id;
-  }
+  // Drain buffered data.
+  child.stdin.read();
 
-  const id = sendCommand(mockWritable, 'abort');
-  assert.equal(id, null, 'abort should return null when stdin is closed');
-  assert.equal(written.length, 0, 'no bytes should be written');
+  // Close stdin (simulates pi process exiting).
+  child.stdin.end();
+  child.stdin.emit('close');
+
+  const chunks = [];
+  child.stdin.on('data', (chunk) => chunks.push(chunk.toString()));
+
+  // abort() should be a no-op because finished is already true or stdin is closed.
+  session.abort();
+  session.abort(); // idempotent
+
+  const buffered = child.stdin.read();
+  assert.equal(buffered, null, 'no bytes should be written after abort on closed stdin');
 });
 
-// ─── abort gates stdout events ──────────────────────────────────────────────
+test('attachPiRpcSession: no agent events emitted after abort()', () => {
+  const { child, events, session } = createSession();
 
-// Simulates the attachPiRpcSession parser loop with the `finished` guard
-// so we can prove no agent events are emitted after abort.
-test('pi RPC: no agent events emitted after abort sets finished', () => {
-  const events = [];
-  let finished = false;
-
-  const send = (_channel, payload) => {
-    events.push(payload);
-  };
-  const ctx = { runStartedAt: Date.now(), sentFirstToken: { value: false } };
-
-  const parser = createJsonLineStream((raw) => {
-    // Mirror the guard in attachPiRpcSession: once finished, skip everything.
-    if (finished) return;
-
-    if (raw.type === 'extension_ui_request') return;
-    if (raw.type === 'response') return;
-
-    mapPiRpcEvent(raw, send, ctx);
-  });
-
-  // Feed normal session events up to a point.
-  const beforeAbort = [
+  // Feed normal session events.
+  feedStdoutLines(child, [
     { type: 'agent_start' },
     { type: 'turn_start' },
     {
       type: 'message_update',
       assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Thinking...' },
     },
-  ].map((l) => JSON.stringify(l)).join('\n') + '\n';
-  parser.feed(beforeAbort);
+  ]);
 
-  // Capture the events so far.
   const beforeCount = events.length;
   assert.ok(beforeCount > 0, 'should have events before abort');
 
-  // Abort — sets finished = true (mirrors attachPiRpcSession.abort()).
-  finished = true;
+  // Abort — sets finished = true, gates further stdout events.
+  session.abort();
 
   // Feed more agent events that arrive during the abort grace window.
-  const afterAbort = [
+  feedStdoutLines(child, [
     {
       type: 'message_update',
       assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Should not appear' },
@@ -599,11 +620,10 @@ test('pi RPC: no agent events emitted after abort sets finished', () => {
       },
     },
     { type: 'agent_end' },
-  ].map((l) => JSON.stringify(l)).join('\n') + '\n';
-  parser.feed(afterAbort);
-  parser.flush();
+  ]);
+  closeStdout(child);
 
-  // No new events should have been emitted after abort.
+  // No new agent events should have been emitted after abort.
   assert.equal(events.length, beforeCount, 'no events should be emitted after abort');
   assert.ok(
     events.every((e) => e.delta !== 'Should not appear' && e.delta !== 'More text'),

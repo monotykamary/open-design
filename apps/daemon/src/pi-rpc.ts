@@ -203,9 +203,10 @@ export function mapPiRpcEvent(raw, send, ctx) {
  * can show "pi · claude-sonnet-4-5" like every other adapter. Then sends
  * the prompt via RPC and streams events back.
  *
- * The returned `abort()` method sends an RPC `abort` command instead of
- * raw SIGTERM, giving pi a chance to clean up gracefully. Falls back to
- * SIGTERM after PI_ABORT_GRACE_MS if pi doesn't exit on its own.
+ * The returned `abort()` method sends an RPC `abort` command so pi can
+ * clean up gracefully (flush logs, finalize session files, etc.). The
+ * caller (runs.cancel()) owns the SIGTERM fallback — abort() does not
+ * kill the child process itself.
  *
  * @param {object} opts
  * @param {import('node:child_process').ChildProcess} opts.child  - spawned pi process
@@ -325,15 +326,13 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
       return fatal;
     },
     abort() {
-      // RPC abort: send the abort command so pi can clean up gracefully.
-      // Fall back to SIGTERM after PI_ABORT_GRACE_MS if pi doesn't exit.
+      // Send RPC abort so pi can clean up gracefully (flush logs,
+      // finalize session files, etc.). The termination guarantee
+      // (SIGTERM fallback) is owned by the caller (runs.cancel()),
+      // not by this method.
       if (finished || child.killed) return;
       finished = true;
       sendCommand(child.stdin, 'abort');
-      const graceMs = Number(process.env.PI_ABORT_GRACE_MS) || 3000;
-      setTimeout(() => {
-        if (!child.killed) child.kill('SIGTERM');
-      }, graceMs).unref();
     },
   };
 }

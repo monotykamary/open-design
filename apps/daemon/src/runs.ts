@@ -126,9 +126,15 @@ export function createChatRunService({
       run.cancelRequested = true;
       run.updatedAt = Date.now();
       // Prefer RPC-level abort for agents that support it (pi, ACP adapters).
-      // Falls back to raw SIGTERM when the session doesn't expose abort().
+      // abort() sends the graceful shutdown signal; cancel() owns the
+      // SIGTERM fallback so that a misbehaving session can't leave the
+      // child alive indefinitely.
       if (run.acpSession?.abort) {
         run.acpSession.abort();
+        const graceMs = Number(process.env.PI_ABORT_GRACE_MS) || 3000;
+        setTimeout(() => {
+          if (run.child && !run.child.killed) run.child.kill('SIGTERM');
+        }, graceMs).unref();
       } else if (run.child && !run.child.killed) {
         run.child.kill('SIGTERM');
       } else {
