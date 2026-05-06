@@ -199,13 +199,21 @@ export function mapPiRpcEvent(raw, send, ctx) {
 /**
  * Attach a pi RPC session to a spawned child process.
  *
+ * Emits `status: initializing` with the model name immediately so the UI
+ * can show "pi · claude-sonnet-4-5" like every other adapter. Then sends
+ * the prompt via RPC and streams events back.
+ *
+ * The returned `abort()` method sends an RPC `abort` command instead of
+ * raw SIGTERM, giving pi a chance to clean up gracefully. Falls back to
+ * SIGTERM after PI_ABORT_GRACE_MS if pi doesn't exit on its own.
+ *
  * @param {object} opts
  * @param {import('node:child_process').ChildProcess} opts.child  - spawned pi process
  * @param {string} opts.prompt   - composed user message
  * @param {string} [opts.cwd]    - working directory
  * @param {string|null} [opts.model] - model id (null = default)
  * @param {function} opts.send   - SSE send function
- * @returns {{ hasFatalError(): boolean }}
+ * @returns {{ hasFatalError(): boolean, abort(): void }}
  */
 export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
   const runStartedAt = Date.now();
@@ -214,11 +222,17 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
   const sentFirstToken = { value: false };
 
   let nextRpcId = 1;
+  let stdinOpen = true;
 
   function sendCommand(writable, type, params = {}) {
+    if (!stdinOpen) return null;
     const id = nextRpcId++;
-    writable.write(`${JSON.stringify({ id, type, ...params })}\n`);
-    return id;
+    try {
+      writable.write(`${JSON.stringify({ id, type, ...params })}\n`);
+      return id;
+    } catch {
+      return null;
+    }
   }
 
   // Track the prompt request id so we know when the prompt response arrives.
@@ -232,11 +246,22 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
     if (!child.killed) child.kill('SIGTERM');
   };
 
+  // Emit initial status with model name immediately — before pi even
+  // responds — so the UI header shows the model name at session start.
+  send('agent', {
+    type: 'status',
+    label: 'initializing',
+    model: typeof model === 'string' && model ? model : null,
+  });
+
   // ---- Outbound: send the prompt via RPC ----
   child.stdin.on('error', (err) => {
     if (err.code !== 'EPIPE') {
       fail(`stdin: ${err.message}`);
     }
+  });
+  child.stdin.on('close', () => {
+    stdinOpen = false;
   });
 
   promptRpcId = sendCommand(child.stdin, 'prompt', { message: prompt });
@@ -292,6 +317,17 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
   return {
     hasFatalError() {
       return fatal;
+    },
+    abort() {
+      // RPC abort: send the abort command so pi can clean up gracefully.
+      // Fall back to SIGTERM after PI_ABORT_GRACE_MS if pi doesn't exit.
+      if (finished || child.killed) return;
+      finished = true;
+      sendCommand(child.stdin, 'abort');
+      const graceMs = Number(process.env.PI_ABORT_GRACE_MS) || 3000;
+      setTimeout(() => {
+        if (!child.killed) child.kill('SIGTERM');
+      }, graceMs).unref();
     },
   };
 }

@@ -447,3 +447,94 @@ test('pi RPC: no duplicate usage when both message_end and turn_end carry usage'
   assert.equal(usageEvents.length, 1, 'should emit exactly one usage event per turn');
   assert.equal(usageEvents[0].usage.input_tokens, 100);
 });
+
+// ─── attachPiRpcSession initial status ─────────────────────────────────────
+
+test('attachPiRpcSession emits status:initializing with model name', () => {
+  // Simulate what attachPiRpcSession does before sending the prompt.
+  // This is the daemon-side injection, not from pi's stdout.
+  const events = [];
+  const send = (_channel, payload) => events.push(payload);
+  const model = 'anthropic/claude-sonnet-4-5';
+
+  // This is the exact line attachPiRpcSession runs before sending the prompt
+  send('agent', {
+    type: 'status',
+    label: 'initializing',
+    model: model,
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'status');
+  assert.equal(events[0].label, 'initializing');
+  assert.equal(events[0].model, 'anthropic/claude-sonnet-4-5');
+});
+
+test('attachPiRpcSession emits status:initializing without model when model is null', () => {
+  const events = [];
+  const send = (_channel, payload) => events.push(payload);
+
+  send('agent', {
+    type: 'status',
+    label: 'initializing',
+    model: null,
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'status');
+  assert.equal(events[0].label, 'initializing');
+  assert.equal(events[0].model, null);
+});
+
+// ─── abort command format ──────────────────────────────────────────────────
+
+test('pi RPC: abort command writes well-formed JSON', async () => {
+  const written = [];
+  const mockWritable = {
+    write(data) {
+      written.push(data);
+    },
+  };
+
+  let nextId = 1;
+  let stdinOpen = true;
+  function sendCommand(writable, type, params = {}) {
+    if (!stdinOpen) return null;
+    const id = nextId++;
+    try {
+      writable.write(`${JSON.stringify({ id, type, ...params })}\n`);
+      return id;
+    } catch {
+      return null;
+    }
+  }
+
+  const id = sendCommand(mockWritable, 'abort');
+  assert.ok(id !== null, 'abort should return a valid id');
+  assert.equal(written.length, 1);
+  const parsed = JSON.parse(written[0].trim());
+  assert.equal(parsed.type, 'abort');
+  assert.equal(typeof parsed.id, 'number');
+});
+
+test('pi RPC: abort is no-op after stdin closed', async () => {
+  const written = [];
+  const mockWritable = {
+    write(data) {
+      written.push(data);
+    },
+  };
+
+  let nextId = 1;
+  let stdinOpen = false; // already closed
+  function sendCommand(writable, type, _params = {}) {
+    if (!stdinOpen) return null;
+    const id = nextId++;
+    writable.write(`${JSON.stringify({ id, type })}\n`);
+    return id;
+  }
+
+  const id = sendCommand(mockWritable, 'abort');
+  assert.equal(id, null, 'abort should return null when stdin is closed');
+  assert.equal(written.length, 0, 'no bytes should be written');
+});

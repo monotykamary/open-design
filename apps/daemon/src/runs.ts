@@ -125,8 +125,15 @@ export function createChatRunService({
     if (!TERMINAL_RUN_STATUSES.has(run.status)) {
       run.cancelRequested = true;
       run.updatedAt = Date.now();
-      if (run.child && !run.child.killed) run.child.kill('SIGTERM');
-      else finish(run, 'canceled', null, 'SIGTERM');
+      // Prefer RPC-level abort for agents that support it (pi, ACP adapters).
+      // Falls back to raw SIGTERM when the session doesn't expose abort().
+      if (run.acpSession?.abort) {
+        run.acpSession.abort();
+      } else if (run.child && !run.child.killed) {
+        run.child.kill('SIGTERM');
+      } else {
+        finish(run, 'canceled', null, 'SIGTERM');
+      }
     }
   };
 
