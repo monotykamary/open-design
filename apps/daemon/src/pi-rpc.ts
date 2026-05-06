@@ -268,6 +268,12 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
 
   // ---- Inbound: parse stdout events ----
   const parser = createJsonLineStream((raw) => {
+    // Once finished (agent_end or abort), stop processing — the run is
+    // over, so no more agent events should be emitted. We still drain
+    // stdout via parser.feed() so the pipe doesn't break; we just skip
+    // acting on the parsed objects.
+    if (finished) return;
+
     // Extension UI requests: auto-resolve to keep pi unblocked.
     if (raw.type === 'extension_ui_request') {
       replyExtensionUi(child.stdin, raw);

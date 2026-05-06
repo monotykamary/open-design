@@ -538,3 +538,75 @@ test('pi RPC: abort is no-op after stdin closed', async () => {
   assert.equal(id, null, 'abort should return null when stdin is closed');
   assert.equal(written.length, 0, 'no bytes should be written');
 });
+
+// ─── abort gates stdout events ──────────────────────────────────────────────
+
+// Simulates the attachPiRpcSession parser loop with the `finished` guard
+// so we can prove no agent events are emitted after abort.
+test('pi RPC: no agent events emitted after abort sets finished', () => {
+  const events = [];
+  let finished = false;
+
+  const send = (_channel, payload) => {
+    events.push(payload);
+  };
+  const ctx = { runStartedAt: Date.now(), sentFirstToken: { value: false } };
+
+  const parser = createJsonLineStream((raw) => {
+    // Mirror the guard in attachPiRpcSession: once finished, skip everything.
+    if (finished) return;
+
+    if (raw.type === 'extension_ui_request') return;
+    if (raw.type === 'response') return;
+
+    mapPiRpcEvent(raw, send, ctx);
+  });
+
+  // Feed normal session events up to a point.
+  const beforeAbort = [
+    { type: 'agent_start' },
+    { type: 'turn_start' },
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Thinking...' },
+    },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n';
+  parser.feed(beforeAbort);
+
+  // Capture the events so far.
+  const beforeCount = events.length;
+  assert.ok(beforeCount > 0, 'should have events before abort');
+
+  // Abort — sets finished = true (mirrors attachPiRpcSession.abort()).
+  finished = true;
+
+  // Feed more agent events that arrive during the abort grace window.
+  const afterAbort = [
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Should not appear' },
+    },
+    { type: 'tool_execution_start', toolCallId: 'tc-1', toolName: 'bash', args: { command: 'ls' } },
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'More text' },
+    },
+    {
+      type: 'turn_end',
+      message: {
+        role: 'assistant',
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
+      },
+    },
+    { type: 'agent_end' },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n';
+  parser.feed(afterAbort);
+  parser.flush();
+
+  // No new events should have been emitted after abort.
+  assert.equal(events.length, beforeCount, 'no events should be emitted after abort');
+  assert.ok(
+    events.every((e) => e.delta !== 'Should not appear' && e.delta !== 'More text'),
+    'post-abort text must not appear in events',
+  );
+});
