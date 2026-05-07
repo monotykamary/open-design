@@ -865,6 +865,7 @@ function attachAgentStreamHandlers(
       model: model ?? null,
       send,
       imagePaths: [],
+      uploadRoot: undefined,
     });
   } else if (def.streamFormat === 'acp-json-rpc') {
     acpSession = attachAcpSession({
