@@ -615,6 +615,72 @@ test('pi RPC: extension_error with missing error uses fallback', () => {
   assert.equal(events[0].message, 'Extension error');
 });
 
+// ─── message_update error delta handling ────────────────────────────────────
+
+test('pi RPC: message_update with error delta maps to error event', () => {
+  const events = simulateRpcSession([
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'error', reason: 'aborted' },
+    },
+  ]);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'error');
+  assert.equal(events[0].message, 'aborted');
+});
+
+test('pi RPC: message_update error delta falls back to delta text', () => {
+  const events = simulateRpcSession([
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'error', delta: 'Connection reset' },
+    },
+  ]);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'error');
+  assert.equal(events[0].message, 'Connection reset');
+});
+
+test('pi RPC: message_update error delta with no reason or delta uses fallback', () => {
+  const events = simulateRpcSession([
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'error' },
+    },
+  ]);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'error');
+  assert.equal(events[0].message, 'Agent error');
+});
+
+test('pi RPC: message_update error after partial output still emits error', () => {
+  // Even after text deltas have been emitted (agentProducedOutput = true
+  // on the server side), a subsequent error delta should still surface
+  // so the run flips to failed rather than succeeding with a partial
+  // response.
+  const events = simulateRpcSession([
+    { type: 'agent_start' },
+    { type: 'turn_start' },
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Partial output' },
+    },
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'error', reason: 'context_overflow' },
+    },
+  ]);
+
+  // status:working, status:thinking, status:streaming, text_delta, error
+  assert.equal(events.length, 5);
+  const errorEvent = events.find((e) => e.type === 'error');
+  assert.ok(errorEvent, 'should emit an error event after partial output');
+  assert.equal(errorEvent.message, 'context_overflow');
+});
+
 // ─── auto_retry_end failure event handling ────────────────────────────────────
 
 test('pi RPC: auto_retry_end with success=false maps to error event', () => {
@@ -754,6 +820,78 @@ test('attachPiRpcSession skips unreadable image paths gracefully', () => {
   assert.ok(promptLine, 'should send a prompt command');
   const parsed = JSON.parse(promptLine);
   assert.equal(parsed.images, undefined, 'prompt should not include images for unreadable paths');
+});
+
+test('attachPiRpcSession rejects non-file image paths (directories)', async () => {
+  const fsp = await import('node:fs/promises');
+  const tmpDir = await import('node:os').then((m) => m.tmpdir());
+  const dirPath = path.join(tmpDir, `pi-rpc-test-dir-${Date.now()}`);
+  await fsp.mkdir(dirPath);
+  try {
+    const events = [];
+    const send = (channel, payload) => events.push({ channel, ...payload });
+    const child = createMockChild();
+
+    attachPiRpcSession({
+      child,
+      prompt: 'check this dir',
+      cwd: '/tmp',
+      model: null,
+      send,
+      imagePaths: [dirPath],
+    });
+
+    const chunks = [];
+    child.stdin.on('data', (chunk) => chunks.push(chunk.toString()));
+    const buffered = child.stdin.read();
+    if (buffered) chunks.push(buffered.toString());
+
+    const lines = chunks.join('').trim().split('\n');
+    const promptLine = lines.find((l) => {
+      try { return JSON.parse(l).type === 'prompt'; } catch { return false; }
+    });
+    assert.ok(promptLine);
+    const parsed = JSON.parse(promptLine);
+    assert.equal(parsed.images, undefined, 'directories should not be forwarded as images');
+  } finally {
+    await fsp.rmdir(dirPath);
+  }
+});
+
+test('attachPiRpcSession rejects disallowed image extensions', async () => {
+  const fsp = await import('node:fs/promises');
+  const tmpDir = await import('node:os').then((m) => m.tmpdir());
+  const tmpFile = path.join(tmpDir, `pi-rpc-test-${Date.now()}.txt`);
+  await fsp.writeFile(tmpFile, 'not an image');
+  try {
+    const events = [];
+    const send = (channel, payload) => events.push({ channel, ...payload });
+    const child = createMockChild();
+
+    attachPiRpcSession({
+      child,
+      prompt: 'what is this',
+      cwd: '/tmp',
+      model: null,
+      send,
+      imagePaths: [tmpFile],
+    });
+
+    const chunks = [];
+    child.stdin.on('data', (chunk) => chunks.push(chunk.toString()));
+    const buffered = child.stdin.read();
+    if (buffered) chunks.push(buffered.toString());
+
+    const lines = chunks.join('').trim().split('\n');
+    const promptLine = lines.find((l) => {
+      try { return JSON.parse(l).type === 'prompt'; } catch { return false; }
+    });
+    assert.ok(promptLine);
+    const parsed = JSON.parse(promptLine);
+    assert.equal(parsed.images, undefined, '.txt files should not be forwarded as images');
+  } finally {
+    await fsp.unlink(tmpFile);
+  }
 });
 
 // ─── original test continues ────────────────────────────────────────────────

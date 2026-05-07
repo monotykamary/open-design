@@ -4224,13 +4224,35 @@ export async function startServer({ port = 7456, host = process.env.OD_BIND_HOST
       // json-event-stream after issue #691. Also enables the
       // substantive-output guard (agentProducedOutput) so a pi run
       // that exits 0 without producing visible content is caught.
+      //
+      // attachPiRpcSession invokes its send callback with the two-arg
+      // channel/payload shape: send('agent', payload) for normal events
+      // and send('error', {message}) from fail(). sendAgentEvent
+      // expects a single event object, so we adapt at the call site:
+      //   - 'agent' channel → relay payload through sendAgentEvent
+      //   - 'error' channel → route through the daemon's error path
+      //     (createSseErrorPayload + send SSE + set agentStreamError)
       trackingSubstantiveOutput = true;
       acpSession = attachPiRpcSession({
         child,
         prompt: composed,
         cwd: effectiveCwd,
         model: safeModel,
-        send: sendAgentEvent,
+        send: (channel, payload) => {
+          if (channel === 'agent') {
+            sendAgentEvent(payload);
+          } else if (channel === 'error') {
+            if (agentStreamError) return;
+            agentStreamError = String(payload?.message || 'Pi session error');
+            send('error', createSseErrorPayload(
+              'AGENT_EXECUTION_FAILED',
+              agentStreamError,
+              { retryable: false },
+            ));
+          } else {
+            send(channel, payload);
+          }
+        },
         imagePaths: def.supportsImagePaths ? safeImages : [],
       });
     } else if (def.streamFormat === 'acp-json-rpc') {

@@ -21,6 +21,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createJsonLineStream } from './acp.js';
 
+// Image forwarding budgets to prevent large synchronous base64 work.
+const MAX_IMAGE_COUNT = 10;
+const MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
+const ALLOWED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+
 // sendCommand is scoped inside attachPiRpcSession to avoid sharing
 // the RPC id counter across concurrent sessions.
 
@@ -144,6 +149,21 @@ export function mapPiRpcEvent(raw, send, ctx) {
 
     if (ev.type === 'thinking_end') {
       send('agent', { type: 'thinking_end' });
+      return null;
+    }
+
+    // pi's RPC protocol emits a message_update with error delta when
+    // the model returns an error (e.g. aborted, context overflow).
+    // Surface it so sendAgentEvent's error-handling path sets
+    // agentStreamError and the run flips to `failed` on close.
+    if (ev.type === 'error') {
+      const message =
+        typeof ev.reason === 'string' && ev.reason.length > 0
+          ? ev.reason
+          : typeof ev.delta === 'string' && ev.delta.length > 0
+            ? ev.delta
+            : 'Agent error';
+      send('agent', { type: 'error', message, raw });
       return null;
     }
 
@@ -297,23 +317,41 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send, imagePaths
   // accepts `images` as an array of {type, data, mimeType} objects where
   // `data` is base64-encoded file contents. The daemon's safeImages guard
   // already validated that each path exists under UPLOAD_DIR.
+  //
+  // Security: realpath resolves symlinks so we re-check that the resolved
+  // path is still a regular file (no /proc/self/mem or symlink escape).
+  // We also enforce a count and total-byte budget to prevent large
+  // synchronous base64 reads from blocking the event loop.
   const images = [];
   if (Array.isArray(imagePaths) && imagePaths.length > 0) {
+    let totalBytes = 0;
     for (const imgPath of imagePaths) {
+      if (images.length >= MAX_IMAGE_COUNT) break;
       if (typeof imgPath !== 'string' || !imgPath.length) continue;
       try {
-        const buf = fs.readFileSync(imgPath);
-        const ext = path.extname(imgPath).toLowerCase();
+        // Resolve symlinks and verify it's a regular file.
+        const realPath = fs.realpathSync(imgPath);
+        const stat = fs.statSync(realPath);
+        if (!stat.isFile()) continue;
+
+        const ext = path.extname(realPath).toLowerCase();
+        if (!ALLOWED_IMAGE_EXTENSIONS.has(ext)) continue;
+
+        // Enforce total byte budget.
+        if (totalBytes + stat.size > MAX_TOTAL_IMAGE_BYTES) continue;
+
+        const buf = fs.readFileSync(realPath);
         const mimeType =
           ext === '.png' ? 'image/png' :
           ext === '.gif' ? 'image/gif' :
           ext === '.webp' ? 'image/webp' :
-          'image/jpeg'; // default for .jpg, .jpeg, and unknown
+          'image/jpeg'; // .jpg, .jpeg, and unknown
         images.push({
           type: 'image',
           data: buf.toString('base64'),
           mimeType,
         });
+        totalBytes += stat.size;
       } catch {
         // Skip unreadable images rather than failing the entire run.
       }
