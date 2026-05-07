@@ -4254,6 +4254,7 @@ export async function startServer({ port = 7456, host = process.env.OD_BIND_HOST
           }
         },
         imagePaths: def.supportsImagePaths ? safeImages : [],
+        uploadRoot: UPLOAD_DIR,
       });
     } else if (def.streamFormat === 'acp-json-rpc') {
       acpSession = attachAcpSession({

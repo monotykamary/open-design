@@ -894,6 +894,103 @@ test('attachPiRpcSession rejects disallowed image extensions', async () => {
   }
 });
 
+test('attachPiRpcSession rejects symlink escape outside uploadRoot', async () => {
+  const fsp = await import('node:fs/promises');
+  const tmpDir = await import('node:os').then((m) => m.tmpdir());
+  // Create a real image file outside the upload root.
+  const outsideDir = path.join(tmpDir, `pi-rpc-test-outside-${Date.now()}`);
+  await fsp.mkdir(outsideDir);
+  const outsideFile = path.join(outsideDir, 'real.jpg');
+  await fsp.writeFile(outsideFile, Buffer.from('fake-jpg-content'));
+  // Create the upload root and a symlink inside it pointing outside.
+  const uploadRoot = path.join(tmpDir, `pi-rpc-test-uploads-${Date.now()}`);
+  await fsp.mkdir(uploadRoot);
+  const symlinkPath = path.join(uploadRoot, 'escape.jpg');
+  await fsp.symlink(outsideFile, symlinkPath);
+  try {
+    const events = [];
+    const send = (channel, payload) => events.push({ channel, ...payload });
+    const child = createMockChild();
+
+    attachPiRpcSession({
+      child,
+      prompt: 'check this',
+      cwd: '/tmp',
+      model: null,
+      send,
+      imagePaths: [symlinkPath],
+      uploadRoot,
+    });
+
+    const chunks = [];
+    child.stdin.on('data', (chunk) => chunks.push(chunk.toString()));
+    const buffered = child.stdin.read();
+    if (buffered) chunks.push(buffered.toString());
+
+    const lines = chunks.join('').trim().split('\n');
+    const promptLine = lines.find((l) => {
+      try { return JSON.parse(l).type === 'prompt'; } catch { return false; }
+    });
+    assert.ok(promptLine);
+    const parsed = JSON.parse(promptLine);
+    assert.equal(parsed.images, undefined, 'symlinks resolving outside uploadRoot should not be forwarded as images');
+  } finally {
+    await fsp.unlink(symlinkPath);
+    await fsp.rmdir(uploadRoot);
+    await fsp.unlink(outsideFile);
+    await fsp.rmdir(outsideDir);
+  }
+});
+
+test('attachPiRpcSession allows symlink inside uploadRoot', async () => {
+  const fsp = await import('node:fs/promises');
+  const tmpDir = await import('node:os').then((m) => m.tmpdir());
+  // Create a real image file inside the upload root.
+  const uploadRoot = path.join(tmpDir, `pi-rpc-test-uploads-in-${Date.now()}`);
+  await fsp.mkdir(uploadRoot);
+  const realFile = path.join(uploadRoot, 'real.png');
+  // Minimal valid PNG header + IHDR so the content isn't empty.
+  await fsp.writeFile(realFile, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  // Create a symlink inside the same root pointing to the real file.
+  const symlinkPath = path.join(uploadRoot, 'link.png');
+  await fsp.symlink(realFile, symlinkPath);
+  try {
+    const events = [];
+    const send = (channel, payload) => events.push({ channel, ...payload });
+    const child = createMockChild();
+
+    attachPiRpcSession({
+      child,
+      prompt: 'check this',
+      cwd: '/tmp',
+      model: null,
+      send,
+      imagePaths: [symlinkPath],
+      uploadRoot,
+    });
+
+    const chunks = [];
+    child.stdin.on('data', (chunk) => chunks.push(chunk.toString()));
+    const buffered = child.stdin.read();
+    if (buffered) chunks.push(buffered.toString());
+
+    const lines = chunks.join('').trim().split('\n');
+    const promptLine = lines.find((l) => {
+      try { return JSON.parse(l).type === 'prompt'; } catch { return false; }
+    });
+    assert.ok(promptLine);
+    const parsed = JSON.parse(promptLine);
+    assert.ok(Array.isArray(parsed.images), 'symlink inside uploadRoot should be forwarded as image');
+    assert.equal(parsed.images.length, 1);
+    assert.equal(parsed.images[0].type, 'image');
+    assert.equal(parsed.images[0].mimeType, 'image/png');
+  } finally {
+    await fsp.unlink(symlinkPath);
+    await fsp.unlink(realFile);
+    await fsp.rmdir(uploadRoot);
+  }
+});
+
 // ─── original test continues ────────────────────────────────────────────────
 
 test('attachPiRpcSession: no agent events emitted after abort()', () => {

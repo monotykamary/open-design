@@ -261,10 +261,11 @@ export function mapPiRpcEvent(raw, send, ctx) {
  * @param {string} [opts.cwd]    - working directory
  * @param {string|null} [opts.model] - model id (null = default)
  * @param {string[]} [opts.imagePaths] - absolute paths to image files for multimodal input
+ * @param {string} [opts.uploadRoot] - root directory that image paths must remain inside after symlink resolution
  * @param {function} opts.send   - SSE send function
  * @returns {{ hasFatalError(): boolean, abort(): void }}
  */
-export function attachPiRpcSession({ child, prompt, cwd, model, send, imagePaths }) {
+export function attachPiRpcSession({ child, prompt, cwd, model, send, imagePaths, uploadRoot }) {
   const runStartedAt = Date.now();
   let finished = false;
   let fatal = false;
@@ -333,6 +334,15 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send, imagePaths
         const realPath = fs.realpathSync(imgPath);
         const stat = fs.statSync(realPath);
         if (!stat.isFile()) continue;
+
+        // Re-verify the resolved path stays inside the upload root.
+        // Without this, a path that passed server.ts's safeImages prefix
+        // check (under UPLOAD_DIR) could be a symlink pointing to a file
+        // outside UPLOAD_DIR, and we'd read/base64-forward it to pi.
+        if (uploadRoot) {
+          const resolvedRoot = fs.realpathSync(uploadRoot);
+          if (realPath !== resolvedRoot && !realPath.startsWith(resolvedRoot + path.sep)) continue;
+        }
 
         const ext = path.extname(realPath).toLowerCase();
         if (!ALLOWED_IMAGE_EXTENSIONS.has(ext)) continue;
