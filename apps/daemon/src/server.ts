@@ -4217,12 +4217,21 @@ export async function startServer({ port = 7456, host = process.env.OD_BIND_HOST
       child.stdout.on('data', (chunk) => copilot.feed(chunk));
       child.on('close', () => copilot.flush());
     } else if (def.streamFormat === 'pi-rpc') {
+      // Route through sendAgentEvent so that pi-rpc's error events
+      // (extension_error, auto_retry_end with success=false, and the
+      // message_update error delta) set agentStreamError and flip the
+      // run to `failed` on close — same path as qoder-stream-json and
+      // json-event-stream after issue #691. Also enables the
+      // substantive-output guard (agentProducedOutput) so a pi run
+      // that exits 0 without producing visible content is caught.
+      trackingSubstantiveOutput = true;
       acpSession = attachPiRpcSession({
         child,
         prompt: composed,
         cwd: effectiveCwd,
         model: safeModel,
-        send,
+        send: sendAgentEvent,
+        imagePaths: def.supportsImagePaths ? safeImages : [],
       });
     } else if (def.streamFormat === 'acp-json-rpc') {
       acpSession = attachAcpSession({

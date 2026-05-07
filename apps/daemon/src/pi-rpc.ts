@@ -17,6 +17,8 @@
  * consumed to keep the protocol clean.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { createJsonLineStream } from './acp.js';
 
 // sendCommand is scoped inside attachPiRpcSession to avoid sharing
@@ -184,12 +186,37 @@ export function mapPiRpcEvent(raw, send, ctx) {
     return null;
   }
 
+  // pi's RPC protocol can emit `extension_error` when an extension
+  // throws during a tool call or event handler. Surface it so the
+  // daemon's error-handling path (sendAgentEvent → agentStreamError)
+  // can flip the run to `failed` and forward a visible SSE error.
+  if (raw.type === 'extension_error') {
+    const message =
+      typeof raw.error === 'string' && raw.error.length > 0
+        ? raw.error
+        : 'Extension error';
+    send('agent', { type: 'error', message, raw });
+    return null;
+  }
+
   if (raw.type === 'compaction_start') {
     send('agent', { type: 'status', label: 'compacting' });
     return null;
   }
   if (raw.type === 'auto_retry_start') {
     send('agent', { type: 'status', label: 'retrying' });
+    return null;
+  }
+
+  if (raw.type === 'auto_retry_end' && raw.success === false) {
+    // Auto-retry exhausted — the agent is about to give up. Surface
+    // the final error so the daemon marks the run as failed rather
+    // than silently succeeding with empty output.
+    const message =
+      typeof raw.finalError === 'string' && raw.finalError.length > 0
+        ? raw.finalError
+        : 'Auto-retry exhausted';
+    send('agent', { type: 'error', message, raw });
     return null;
   }
 
@@ -213,10 +240,11 @@ export function mapPiRpcEvent(raw, send, ctx) {
  * @param {string} opts.prompt   - composed user message
  * @param {string} [opts.cwd]    - working directory
  * @param {string|null} [opts.model] - model id (null = default)
+ * @param {string[]} [opts.imagePaths] - absolute paths to image files for multimodal input
  * @param {function} opts.send   - SSE send function
  * @returns {{ hasFatalError(): boolean, abort(): void }}
  */
-export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
+export function attachPiRpcSession({ child, prompt, cwd, model, send, imagePaths }) {
   const runStartedAt = Date.now();
   let finished = false;
   let fatal = false;
@@ -265,7 +293,37 @@ export function attachPiRpcSession({ child, prompt, cwd, model, send }) {
     stdinOpen = false;
   });
 
-  promptRpcId = sendCommand(child.stdin, 'prompt', { message: prompt });
+  // Build the images array for pi's prompt command. pi's RPC protocol
+  // accepts `images` as an array of {type, data, mimeType} objects where
+  // `data` is base64-encoded file contents. The daemon's safeImages guard
+  // already validated that each path exists under UPLOAD_DIR.
+  const images = [];
+  if (Array.isArray(imagePaths) && imagePaths.length > 0) {
+    for (const imgPath of imagePaths) {
+      if (typeof imgPath !== 'string' || !imgPath.length) continue;
+      try {
+        const buf = fs.readFileSync(imgPath);
+        const ext = path.extname(imgPath).toLowerCase();
+        const mimeType =
+          ext === '.png' ? 'image/png' :
+          ext === '.gif' ? 'image/gif' :
+          ext === '.webp' ? 'image/webp' :
+          'image/jpeg'; // default for .jpg, .jpeg, and unknown
+        images.push({
+          type: 'image',
+          data: buf.toString('base64'),
+          mimeType,
+        });
+      } catch {
+        // Skip unreadable images rather than failing the entire run.
+      }
+    }
+  }
+
+  promptRpcId = sendCommand(child.stdin, 'prompt', {
+    message: prompt,
+    ...(images.length > 0 ? { images } : {}),
+  });
 
   // ---- Inbound: parse stdout events ----
   const parser = createJsonLineStream((raw) => {
